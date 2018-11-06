@@ -1,0 +1,173 @@
+---
+title: "Tidy Tuesday 06-11-2018"
+author: "Steve Burr"
+date: "6 November 2018"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Tidy Tuesday 06/11/2018
+
+It's been quite a while since I've done anything with #TidyTuesday. My plan for this week is to spend about an hour producing a brief analysis / visualisation using the provided dataset and write up all my experiments / thinking as I go along using RMarkdown. Let's see how it goes...
+
+
+The dataset is on [GitHub](https://github.com/rfordatascience/tidytuesday/tree/master/data/2018-11-06) and it also references additional information at [Energy.gov](https://www.energy.gov/eere/wind/2017-wind-market-reports) and [USGS](https://eerscmap.usgs.gov/uswtdb/data/).
+
+
+The first step is load required packages and download the data:
+
+```{r message=FALSE, warning=FALSE}
+library(tidyverse)
+
+data <- read_csv("https://raw.githubusercontent.com/rfordatascience/tidytuesday/master/data/2018-11-06/us_wind.csv")
+
+```
+
+Let's quickly take a look at the data (a full data dictionary is on GitHub):
+
+```{r}
+
+head(data)
+
+```
+
+It feels like it could be interesting to udnerstand how the number of wind turbines has changed over time. There's potential to also include region within this.
+
+The variables which encode capacity and the number of turbines in a development look to be "p_cap" and "p_tnum" respectively.
+
+But first there's something which looks a bit strange which needs a bit more investigation - all the lines printed out by my head command seem to be for the same development, so I'm keen to understand what a row in the data means.
+
+Flicking through a few more lines in the data, seems to suggest that there is about one line per turbine (p_tnum).
+
+```{r}
+#Compare the number of rows in the data to the number of turbines in the development
+#Visually
+data %>% group_by(p_name) %>%
+  transmute(p_tnum=p_tnum,
+            count = n()) %>%
+  ggplot(aes(x=count,y=p_tnum)) +
+  geom_point()+
+  theme_minimal()
+
+#Compare using a simple linear regression
+data %>% group_by(p_name) %>%
+  transmute(p_tnum=p_tnum,
+            count = n()) %>% lm(p_tnum~count,data=.) %>% summary()
+
+```
+
+These suggest that this assumption is approximately right - but not always so.
+
+For the purposes of the rest of the work, I'm going to summarise to a "project" level based on the p_name variable.
+
+```{r}
+
+data %>% select(p_name,t_state,p_year,p_tnum,p_cap) %>%
+  group_by(p_name,t_state,p_year) %>% #summarise to project level, take the highest values of p_tnum/p_cap which appear in each project + exclude NAs
+  summarise(p_tnum=max(p_tnum,na.rm=TRUE),
+            p_cap=max(p_cap,nam.rm=TRUE))-> project_data
+
+```
+
+Now let's check how much missing data there is the the key two numeric variables:
+
+```{r}
+
+summary(project_data$p_tnum)
+summary(project_data$p_cap)
+
+```
+
+Both variables are free of missing values - so let's move on to some visualisation.
+
+First, let's understand the capacity and number of turbines by year:
+
+```{r}
+
+project_data %>% group_by(p_year) %>%
+  summarise(Turbines=sum(p_tnum),Capacity=sum(p_cap)) %>% #give the totals a nicer name for visualisation
+  ggplot() +
+  geom_line(aes(x=p_year,y=Turbines),colour="blue") +
+  geom_line(aes(x=p_year,y=Capacity),colour="grey50") +
+  theme_minimal()
+```
+
+This doesn't quite look as expected!
+
+Let's do some more digging into p_year:
+
+```{r}
+project_data %>% group_by(p_year) %>%
+  summarise(count=n())
+
+```
+
+This shows that there are values with -9999 for p_year which represent missing values. We can't really include these in an analysis which looks at the data overtime, so we'll exclude these results and redo the visualisation:
+
+```{r}
+project_data %>% filter(p_year != -9999) %>% #remove unknown years
+  group_by(p_year) %>%
+  summarise(Turbines=sum(p_tnum),Capacity=sum(p_cap)) %>% #give the totals a nicer name for visualisation
+  ggplot() +
+  geom_line(aes(x=p_year,y=Turbines),colour="blue") +
+  geom_line(aes(x=p_year,y=Capacity),colour="grey50") +
+  theme_minimal() +
+  labs(title="Number of turbines(blue) and Capacity/MW (grey)",
+       y="",#y has mixed units (generally a bad idea)
+       x="Year")
+
+```
+
+This is interesting, it shows that the number of turbines is far higher in more recent years, and that capacity has been growing more rapidly than the number of turbines since ~ 2005.
+
+I'd like to understand how capacity per turbine has changed over time, and then whether this looks to be linked to demand.
+
+But before doing that, I want to confirm that the data is representing the construction of new wind turbines and isn't cumulative (this definitely looks to be the case, and this makes sense). I can try to confirm this by quickly looking at how often the same project name appears in multiple years. If it's a lower number then it's a dataset which shows construction...
+
+```{r}
+project_data %>% group_by(p_name) %>% summarise(count=n()) %>% pull(count) %>% summary()
+```
+
+I'm happy this confirms that the data is about construction, so let's get into understanding the relationships between average capacity per turbine and construction.
+
+```{r}
+project_data %>% filter(p_year != -9999) %>% #remove unknown years
+  group_by(p_year) %>%
+  summarise(Turbines=sum(p_tnum),Capacity=sum(p_cap)) %>%
+  mutate(`Average Capacity Per Turbine`=Capacity/Turbines) %>%
+  ggplot(aes(x=p_year,y=`Average Capacity Per Turbine`)) +
+  geom_point(colour="blue",cex=2) +
+  geom_smooth(se=FALSE) + #add a trend line but don't plot se
+  theme_minimal()+
+  labs(title="The efficiency of wind turbines has increased significantly since 1980",
+       subtitle="NB downward curve at end of trendline is driven by a single outlier",
+       x="Year")
+```
+
+This makes the point about efficiency significantly more clearly than the previous graph.
+
+Now, I want to see if there's a relationship between efficiency and the number of turbines constructed.
+
+```{r}
+project_data %>% filter(p_year != -9999) %>% #remove unknown years
+  group_by(p_year) %>%
+  summarise(Turbines=sum(p_tnum),Capacity=sum(p_cap)) %>%
+  mutate(`Average Capacity Per Turbine`=Capacity/Turbines) %>%
+  ggplot(aes(x=`Average Capacity Per Turbine`,y=Turbines)) +
+  geom_point(colour="blue",cex=2) +
+  geom_smooth(se=FALSE,method="lm") + #add a trend line but don't plot se
+  theme_minimal()+
+  labs(title="More wind turbines have been built since they became more efficent",
+       y="Number of turbines built in year")
+
+```
+
+
+This is where I got to in an hour, I feel like I've learnt a few interesting things from the dataset, and found an interesting relationship between the number of turbines built and how efficient the average turbine is. The data doesn't show a causal relationship (and causality makes sense in both directions) but this relationship makes sense to see either way (the more turbines are built, the better they are likely to get and the more efficient turbines are the more sense they make to build in a wider variety of locations).
+
+### Additional work beyond an hour
+
+I'd like to refine the final visuals I produced during my quick analysis so that I have a more effective visual to share on social media.
